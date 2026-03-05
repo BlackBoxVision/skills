@@ -24,6 +24,7 @@ Skills live in a ZIP archive structured as:
 | Skill | Description | Trigger keywords |
 |-------|-------------|-----------------|
 | [agent-readiness](./agent-readiness/) | Audits a project for AI-assisted development readiness. Scores 8 dimensions and produces a prioritized report. | "agent readiness", "AI readiness", "ready for Claude Code", "audit for automation" |
+| [project-cost-estimator](./project-cost-estimator/) | Analyzes source code, git history, and architecture to estimate what a project cost to build — and what it would cost using a modern AI agent fleet. Produces a side-by-side human vs. AI cost report with gross margin delta. | "how much did this cost to build", "estimate project cost", "AI vs human development cost", "gross margin from using agents", "what's this codebase worth" |
 
 ---
 
