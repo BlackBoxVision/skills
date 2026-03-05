@@ -1,339 +1,399 @@
 ---
 name: project-cost-estimator
-description: >
-  Analyzes a software project's source code, git history, and architecture to
-  estimate what it actually cost to build — and compares that against what it
-  would cost using a modern AI agent fleet (Claude Code, OpenCode, Goose, Codex,
-  Kimi Code) managed by a single engineer. Use this skill whenever the user wants
-  to: audit a project's build cost, estimate software value, understand the ROI of
-  AI-assisted development, calculate gross margins from AI vs human teams, evaluate
-  outsourcing vs in-house costs, or benchmark a codebase's investment. Trigger on
-  phrases like "how much did this cost to build", "estimate project cost", "AI vs
-  human development cost", "gross margin from using agents", "what's this codebase
-  worth", "value of the code", or "audit this project's effort".
+description: Analyzes a software project's source code, git history, and architecture to estimate what it actually cost to build — and compares that against what it would cost using a modern AI agent fleet (Claude Code, OpenCode, Goose, Codex, Kimi Code) managed by a single engineer. Use this skill whenever the user wants to: audit a project's build cost, estimate software value, understand the ROI of AI-assisted development, calculate gross margins from AI vs human teams, evaluate outsourcing vs in-house costs, or benchmark a codebase's investment. Trigger on phrases like "how much did this cost to build", "estimate project cost", "AI vs human development cost", "gross margin from using agents", "what's this codebase worth", "value of the code", or "audit this project's effort".
 ---
 
 # Project Cost Estimator
 
-Performs forensic analysis of a software project — source code, git history,
-architecture — and produces two estimates side by side:
+## Purpose
 
-1. **Human build cost** — what the project actually cost (or would cost) with
-   the real team profile (agency, in-house, freelancers, nearshore, offshore, etc.)
-2. **AI agent fleet cost** — what the same project would cost using a managed
-   fleet of AI coding agents, and the **gross margin delta** that reveals.
+This skill estimates the **real engineering cost** of a software project and evaluates whether it was executed efficiently. It is designed for **internal agency use** — not for client-facing presentations.
 
----
+The core question it answers: **Did we execute this project well, financially?**
 
-## Phase 0 — Gather inputs before touching the code
+Secondary questions:
+- Was AI leverage maximized?
+- Where was effort concentrated relative to complexity?
+- What is our gross margin at market rate vs. our actual cost?
+- What would it cost to rebuild this today, with a modern AI fleet?
 
-Before running any analysis, collect two things from the user:
-
-### A. Project path
-
-Ask for the full path to the project directory if not already provided. If the
-user is in Claude Code, it may be the current working directory.
-
-### B. Team profile interview
-
-Ask the following questions (you can batch them in one message):
-
-```
-To calibrate the cost model I need to understand the team that built this:
-
-1. **Team type** — which best describes who built it?
-   - [ ] Internal / in-house engineering team
-   - [ ] Agency (full-service software agency)
-   - [ ] Nearshore agency or contractor team
-   - [ ] Offshore agency or contractor team (e.g., India, Eastern Europe, LATAM)
-   - [ ] Freelancers (assembled team or solo)
-   - [ ] Mixed (describe)
-
-2. **Geography / market** — where was the primary team based?
-   (This drives the hourly rate range. E.g., "NYC", "Buenos Aires", "Kyiv", "Bangalore")
-
-3. **Do you know the approximate hourly rate?**
-   - If yes → provide it (we'll use it directly)
-   - If no → I'll estimate from team type + geography using market benchmarks
-
-4. **Known actuals (optional but improves accuracy)**
-   - Rough calendar duration of active development (e.g., "8 months")
-   - Approximate team size during peak (e.g., "3 devs + 1 designer")
-   - Any known invoiced amount or budget (kept private, only used for calibration)
-```
-
-Store answers in a `team_profile` object before proceeding.
+The tone of all output is **analytical and neutral** — not consultative or judgmental.
 
 ---
 
-## Phase 1 — Source Code Analysis
+## Step 1: Gather Project Signals
 
-Run these commands against the project directory. Adapt paths as needed.
-
-### 1.1 Basic inventory
+### 1a. Repository metrics
 
 ```bash
-# File count and types
-find <PROJECT_DIR> -type f | grep -v node_modules | grep -v .git | grep -v __pycache__ \
-  | sed 's/.*\.//' | sort | uniq -c | sort -rn | head -30
+# Project root
+ls -la <project-root>
 
-# Lines of code by language (use cloc if available, else wc fallback)
-cloc <PROJECT_DIR> --exclude-dir=node_modules,.git,dist,build,vendor \
-  --json 2>/dev/null || \
-  find <PROJECT_DIR> -type f \( -name "*.ts" -o -name "*.tsx" -o -name "*.js" \
-    -o -name "*.py" -o -name "*.go" -o -name "*.java" -o -name "*.rs" \
-    -o -name "*.cs" -o -name "*.rb" -o -name "*.php" \) \
-  | grep -v node_modules | grep -v .git \
-  | xargs wc -l 2>/dev/null | tail -1
+# Total LOC by language (cloc is preferred)
+cloc <project-root> --exclude-dir=node_modules,dist,.next,coverage,generated
+
+# TypeScript/JS files only
+find <project-root> -name "*.ts" -o -name "*.tsx" | xargs wc -l 2>/dev/null | tail -1
+
+# Git commit history
+git -C <project-root> log --oneline | wc -l
+git -C <project-root> log --format="%ad" --date=short | sort -u | head -1
+git -C <project-root> log --format="%ad" --date=short | sort -u | tail -1
+
+# Commit size distribution (lines changed per commit)
+git -C <project-root> log --shortstat --oneline | grep "files changed" | \
+  awk '{sum+=$4+$6; count++} END {print "Total lines changed:", sum, "| Commits:", count, "| Avg:", sum/count}'
+
+# Author contributions
+git -C <project-root> shortlog -sn --no-merges | head -10
+
+# High-churn files (modified most often)
+git -C <project-root> log --name-only --format="" | sort | uniq -c | sort -rn | head -20
+
+# Branch history
+git -C <project-root> branch -a | wc -l
 ```
 
-### 1.2 Architecture fingerprint
+### 1b. Feature surface metrics
+
+These are far stronger effort predictors than LOC for modern TypeScript stacks.
 
 ```bash
-# Directory structure (top 2 levels)
-find <PROJECT_DIR> -maxdepth 3 -type d | grep -v node_modules | grep -v .git \
-  | grep -v __pycache__ | sort
+# API endpoints (NestJS controllers)
+grep -r "@Get\|@Post\|@Put\|@Patch\|@Delete" <project-root>/src --include="*.ts" -l | wc -l
+grep -r "@Get\|@Post\|@Put\|@Patch\|@Delete" <project-root>/src --include="*.ts" | wc -l
 
-# Key config files (detect frameworks/stack)
-find <PROJECT_DIR> -maxdepth 2 -name "package.json" -o -name "requirements.txt" \
-  -o -name "Cargo.toml" -o -name "go.mod" -o -name "pom.xml" \
-  -o -name "build.gradle" -o -name "Gemfile" -o -name "composer.json" \
-  -o -name "*.csproj" -o -name "Dockerfile" -o -name "docker-compose*.yml" \
-  -o -name "terraform.tf" -o -name "*.tf" \
-  | grep -v node_modules | head -20
+# Database models (Prisma)
+grep -c "^model " <project-root>/prisma/schema.prisma 2>/dev/null
 
-# Read dependency manifest(s) for tech stack identification
-# (read package.json, requirements.txt, etc. — pick the relevant one)
+# Background jobs/queues
+grep -r "@Processor\|@Queue\|BullModule\|@InjectQueue" <project-root>/src --include="*.ts" -l | wc -l
+
+# External integrations (HTTP clients, SDKs)
+grep -r "HttpModule\|axios\|fetch\|new.*Client\|SDK" <project-root>/src --include="*.ts" -l | sort -u | wc -l
+
+# UI screens / pages (Refine/Next/React)
+find <project-root> -name "*.tsx" -path "*/pages/*" -o -name "*.tsx" -path "*/views/*" 2>/dev/null | wc -l
+
+# Role-based actions / guards
+grep -r "@Roles\|@UseGuards\|RolesGuard\|Permissions" <project-root>/src --include="*.ts" | wc -l
+
+# State machines / complex flows
+grep -r "createMachine\|useMachine\|state.*machine\|FSM\|StateMachine" <project-root>/src --include="*.ts" -l | wc -l
+
+# Tests
+find <project-root> -name "*.spec.ts" -o -name "*.test.ts" | wc -l
 ```
 
-### 1.3 Complexity signals
+### 1c. Module inventory
 
-```bash
-# Largest files (often most complex)
-find <PROJECT_DIR> -type f \( -name "*.ts" -o -name "*.tsx" -o -name "*.py" \
-  -o -name "*.go" -o -name "*.java" \) \
-  | grep -v node_modules | grep -v .git \
-  | xargs wc -l 2>/dev/null | sort -rn | head -20
+Manually identify and categorize all modules into three complexity tiers:
 
-# Number of test files
-find <PROJECT_DIR> -type f \( -name "*.test.*" -o -name "*.spec.*" -o -name "*_test.*" \
-  -o -path "*/tests/*" -o -path "*/__tests__/*" \) \
-  | grep -v node_modules | wc -l
-```
+| Tier | Definition | Effort Range |
+|------|-----------|--------------|
+| Simple | CRUD module, single entity, no side effects | 20–40 hrs |
+| Standard | Multi-entity, business logic, integrations | 40–80 hrs |
+| Complex | State machines, external APIs, concurrency, auth flows | 80–160 hrs |
 
-Read the following files if they exist to understand architecture intent:
-`README.md`, `ARCHITECTURE.md`, `docs/`, `ADR/` (Architecture Decision Records),
-`CLAUDE.md`, `.claude/`.
+Use the feature surface metrics above to inform module classification. **Do not use LOC to classify modules.**
 
 ---
 
-## Phase 2 — Git History Analysis
+## Step 2: Build the System Scope Snapshot
 
-```bash
-# Contributor count and commit volume
-git -C <PROJECT_DIR> log --pretty=format:"%ae" | sort | uniq -c | sort -rn
+Before any estimation, produce a single clear table that summarizes project scope. This is the anchor for all subsequent analysis.
 
-# Total commits
-git -C <PROJECT_DIR> rev-list --count HEAD
-
-# Date range of development
-git -C <PROJECT_DIR> log --pretty=format:"%ad" --date=short | tail -1   # first commit
-git -C <PROJECT_DIR> log --pretty=format:"%ad" --date=short | head -1   # last commit
-
-# Commit frequency over time (weekly buckets)
-git -C <PROJECT_DIR> log --pretty=format:"%ad" --date=format:"%Y-%W" | \
-  sort | uniq -c
-
-# Average commits per week (active period)
-git -C <PROJECT_DIR> log --pretty=format:"%ad" --date=format:"%Y-%W" | \
-  sort -u | wc -l
-
-# Lines added/removed (effort signal)
-git -C <PROJECT_DIR> log --pretty=tformat: --numstat | \
-  awk 'NF==3 {added+=$1; removed+=$2} END {print "added:"added, "removed:"removed}'
-
-# Branches (indicates parallel workstreams)
-git -C <PROJECT_DIR> branch -r | wc -l
+```
+System Scope
+────────────────────────────────
+Applications (apps/packages):  N
+API modules:                   N
+Database models:               N
+Background queues:             N
+External API integrations:     N
+User roles:                    N
+Primary workflows:             N
+UI screens (estimated):        N
+Browser extension flows:       N
+────────────────────────────────
 ```
 
-Parse this data to extract:
-- **Active development window** (first to last commit with activity > 2 commits/week)
-- **Contributor count** (unique email addresses)
-- **Commit cadence** (indicates whether this was full-time or part-time work)
-- **Net new code** (added - removed, after normalizing for refactors)
+If a number cannot be determined with confidence, mark it `~N` (approximate) or `?` (unknown).
 
 ---
 
-## Phase 3 — Architecture Assessment
+## Step 3: Estimate Development Effort
 
-Based on the collected data, classify the project across these dimensions.
-Use references/complexity-matrix.md for scoring guidance.
+### 3a. Module-based estimation (primary method)
 
-| Dimension | Score (1–5) | Notes |
-|-----------|-------------|-------|
-| **Integration complexity** | | APIs, third-party services, webhooks |
-| **Data model complexity** | | Schema depth, relations, migrations |
-| **Frontend complexity** | | UI depth, state management, responsiveness |
-| **Infrastructure complexity** | | Cloud, IaC, CI/CD, multi-env |
-| **Business logic density** | | Domain rules, workflows, edge cases |
-| **Security surface** | | Auth, permissions, compliance |
-| **Test coverage maturity** | | Unit, integration, e2e |
-| **Technical debt** | | Code smells, TODOs, deprecated patterns |
+For each identified module, assign a complexity tier and estimate hours:
 
-**Complexity multiplier** = average score across dimensions (feeds into cost model).
+```
+Module Inventory
+──────────────────────────────────────────────────────────
+Module Name           Tier        Hours (range)
+──────────────────────────────────────────────────────────
+[module 1]            Complex     80–120
+[module 2]            Standard    50–70
+[module 3]            Simple      25–35
+...
+──────────────────────────────────────────────────────────
+Subtotal — Implementation                   XXX–XXX hrs
++ Infrastructure / DevOps (10–15%)          XX–XX hrs
++ Architecture & design (5–10%)             XX–XX hrs
++ Integration & QA (10–15%)                 XX–XX hrs
+──────────────────────────────────────────────────────────
+TOTAL ESTIMATED EFFORT                      XXX–XXX hrs
+```
+
+### 3b. Git-signal cross-check
+
+Use git signals to validate or adjust the module estimate:
+
+- **Commit volume**: N commits over X weeks = Y avg commits/week. High-frequency projects (>5/day) suggest intensive development. Low-frequency (<1/day) may indicate design-heavy or async work.
+- **Avg lines changed per commit**: Very high (>500) suggests generated code, squash merges, or AI bursts. Very low (<20) suggests iterative polish. Neither directly indicates effort.
+- **High-churn files**: Files modified in >10% of commits are complexity hotspots. If they align with a "simple" module classification, revise upward.
+- **Author split**: If 80%+ of commits are from one author, solo velocity assumptions apply. Multi-author projects have coordination overhead (add 10–20%).
+
+**Important**: Git signals are cross-checks, not primary drivers. A squash-merge repo will look artificially low-commit.
+
+### 3c. Do NOT use COCOMO
+
+Classic COCOMO is designed for large waterfall teams building from scratch with minimal framework leverage. It produces estimates 3–10x higher than reality for modern TypeScript stacks with NestJS, Prisma, Refine, and AI-assisted development. If COCOMO is referenced anywhere in prior reports, discard that number entirely.
 
 ---
 
-## Phase 4 — Human Cost Estimation
+## Step 4: Estimate AI-Assisted Rebuild Cost
 
-### 4.1 Effort estimation (bottom-up)
+### 4a. AI code generation split
 
-Use the COCOMO-inspired model adjusted for modern stacks:
-
-```
-Effective KLOC = (net new lines of code) / 1000
-                 adjusted for language (see references/loc-weights.md)
-
-Base effort (person-months) = 2.4 × (KLOC ^ 1.05)   ← organic mode baseline
-Adjusted effort = base × complexity_multiplier × stack_multiplier
-```
-
-Cross-validate against git signals:
-- Active weeks × contributor count × estimated hours/week (40 for full-time,
-  20 for part-time based on commit cadence)
-
-Take the **average of the two estimates** as the working effort figure.
-Report both with a ± confidence range.
-
-### 4.2 Rate lookup
-
-Read `references/rate-table.md` for market hourly rate ranges by team type
-and geography. Use the midpoint unless the user gave an actual rate.
-
-### 4.3 Human cost output
+Estimate the portion of the codebase that was or could be AI-generated:
 
 ```
-Total effort:       X person-months  (Y person-hours)
-Blended hourly rate: $Z/hr
-────────────────────────────────────
-Estimated build cost:  $A  (low: $B, high: $C)
+Code Authorship Split (estimated)
+──────────────────────────────────────
+AI-generated / assisted:   ~X% of LOC
+Human-written:             ~X% of LOC
+──────────────────────────────────────
 ```
+
+Typical ranges for AI-assisted projects:
+- Boilerplate (CRUD, DTOs, migrations): 70–90% AI-generatable
+- Business logic, integrations: 30–50% AI-generatable
+- Custom algorithms, state machines: 10–30% AI-generatable
+
+### 4b. Token consumption model
+
+Do NOT estimate AI cost by mapping "AI hours" to tokens. Instead:
+
+```
+Token Estimation
+──────────────────────────────────────────────────────────
+Estimated AI-generated LOC: X lines
+Code generation tokens:     X lines × 10 tokens/LOC = X tokens
+Context + iteration (3–5×): X tokens
+──────────────────────────────────────────────────────────
+Estimated total tokens:     ~X M tokens
+Cost @ Claude Sonnet:       ~$X (at $3/M input + $15/M output)
+Cost @ GPT-4o:              ~$X
+──────────────────────────────────────────────────────────
+```
+
+### 4c. AI-assisted rebuild timeline
+
+Break delivery into phases and show human vs AI-assisted timelines:
+
+```
+Delivery Timeline by Phase
+──────────────────────────────────────────────────────────
+Phase               Human team      AI-assisted (1 eng)
+──────────────────────────────────────────────────────────
+Discovery & design  2–3 weeks       2–3 weeks (unchanged)
+Architecture        2–3 weeks       1–2 weeks
+Implementation      X months        X months
+Integration         X weeks         X weeks
+Testing & QA        X weeks         X weeks
+Iteration           X weeks         X weeks
+──────────────────────────────────────────────────────────
+TOTAL               ~X months       ~X months
+──────────────────────────────────────────────────────────
+```
+
+Note: AI accelerates implementation, not discovery, product iteration, or stakeholder feedback cycles. A 3–4× speedup claim must be scoped to implementation phases only.
 
 ---
 
-## Phase 5 — AI Agent Fleet Cost Estimation
+## Step 5: Financial Assessment
 
-Read `references/agent-cost-models.md` for current pricing data.
+This is the core output for the agency. The goal is to evaluate execution efficiency.
 
-### 5.1 Task decomposition
-
-Based on the architecture assessment, break the project into task categories:
-
-| Category | % of effort | AI suitability |
-|----------|-------------|----------------|
-| Boilerplate / scaffolding | ~15% | Very high (95%) |
-| CRUD / standard patterns | ~20% | Very high (90%) |
-| Integration work | ~20% | High (75%) |
-| Business logic | ~25% | Medium (60%) |
-| UI / UX implementation | ~10% | Medium-High (70%) |
-| Testing | ~5% | High (80%) |
-| DevOps / infra | ~5% | Medium (65%) |
-
-**AI coverage** = weighted average suitability across categories.
-
-### 5.2 Cost per agent
-
-For each agent in the standard fleet, calculate:
-- Token cost = estimated tokens per task × token price
-- Tool call cost (if applicable)
-- Assumed human oversight ratio (how many hours of manager time per agent-hour)
-
-Agents to model (see `references/agent-cost-models.md` for current rates):
-
-| Agent | Model backend | Cost model | Best for |
-|-------|--------------|------------|----------|
-| **Claude Code** | claude-sonnet/opus | Per token (input/output) | Complex reasoning, architecture |
-| **OpenCode** | configurable | Per token | Multi-model routing, flexibility |
-| **Goose** | configurable | Per token + tool calls | Agentic workflows, file ops |
-| **Codex (OpenAI)** | gpt-4o/o3 | Per token | General coding, JS/Python |
-| **Kimi Code** | Kimi k1.5/k2 | Per token (cheaper tier) | High volume, cost-sensitive tasks |
-
-### 5.3 Fleet composition recommendation
-
-Suggest an optimal agent mix for this specific project type.
-
-### 5.4 Manager cost
-
-One senior engineer manages the fleet:
-- Geography: ask user, or default to same geography as original team
-- Time allocation: typically 20–35% of original dev hours
-  (prompting, reviewing, correcting, integrating)
-
-### 5.5 AI fleet cost output
+### 5a. Cost comparison table
 
 ```
-AI agent compute cost:      $A
-Human manager cost:         $B  (X hrs × $Y/hr)
-─────────────────────────────
-Total AI fleet cost:        $C
-
-vs. Human build cost:       $D
-─────────────────────────────
-Cost reduction:             $E  (F%)
-Gross margin captured:      G%  (if this is client work)
-Speed multiplier:           ~Xh (estimated calendar time compression)
+Cost Analysis
+──────────────────────────────────────────────────────────
+                           Hours       Rate        Total
+──────────────────────────────────────────────────────────
+Actual cost (billed/spent) XXX hrs    $XX/hr      $XX,XXX
+Market rate (human team)   XXX hrs    $XX/hr      $XX,XXX
+AI-assisted rebuild        XXX hrs    $XX/hr      $XX,XXX
+──────────────────────────────────────────────────────────
 ```
 
----
+### 5b. Gross margin analysis
 
-## Phase 6 — Final Report
+```
+Gross Margin
+──────────────────────────────────────────────────────────
+Contract value (if known):         $XX,XXX
+Actual cost (labor + tools):       $XX,XXX
+Gross margin:                      XX%
+──────────────────────────────────────────────────────────
+If rebuilt with AI fleet today:
+  Estimated cost:                  $XX,XXX
+  Margin at same contract value:   XX%
+──────────────────────────────────────────────────────────
+```
 
-Produce a structured report with the following sections. Save to
-`project-cost-report.md` (or `.pdf` if the pdf skill is available).
+### 5c. AI leverage delta
 
-```markdown
-# Project Cost Analysis: <Project Name>
-Generated: <date>
-
-## Executive Summary
-[3-sentence summary of key findings]
-
-## Project Profile
-- Stack: ...
-- Architecture type: ...
-- Active development: <start> → <end> (<N> months)
-- Team: <type>, <location>
-- Codebase: <KLOC> KLOC across <N> files (<languages>)
-
-## Effort Analysis
-[Table: estimation method | person-hours | confidence]
-
-## Human Build Cost
-[Cost breakdown with assumptions]
-
-## AI Agent Fleet Estimate
-[Per-agent breakdown, manager cost, total]
-
-## Comparative Analysis
-[Side-by-side table, margin delta, speed comparison]
-
-## Recommended Agent Fleet for This Project
-[Specific recommendation with rationale]
-
-## Assumptions & Caveats
-[What could shift these numbers]
+```
+AI Leverage Assessment
+──────────────────────────────────────────────────────────
+Estimated AI usage in delivery:    Low / Medium / High
+Potential AI usage for this scope: High
+Unrealized leverage:               Significant / Moderate / Minimal
+──────────────────────────────────────────────────────────
 ```
 
 ---
 
-## Key principles
+## Step 6: Risk & Complexity Drivers
 
-- **Always show your work.** Every number should trace back to a specific
-  data source (git log output, LOC count, rate table).
-- **Confidence intervals matter.** Never give a single number without a range.
-- **Be honest about AI limits.** Not everything is automatable. The model
-  explicitly tracks what AI agents can't do well.
-- **Rates drift.** Agent pricing changes frequently — note the reference date
-  in `agent-cost-models.md` and flag if data may be stale.
-- **Context is king.** A 50K LOC codebase from a fintech startup costs very
-  differently than 50K LOC of a CRUD admin panel.
+List the top 4–8 complexity risks that drove cost. This explains why certain modules are expensive and adds credibility to the estimates.
+
+```
+Complexity Risk Table
+──────────────────────────────────────────────────────────
+Risk Factor                    Impact
+──────────────────────────────────────────────────────────
+[e.g. OEM portal automation]   Brittle UI scraping, high maintenance
+[e.g. Queue-based sync]        Concurrency errors, idempotency
+[e.g. Browser extension auth]  Security surface, cross-context state
+[e.g. Claim state machine]     Business logic depth, edge cases
+──────────────────────────────────────────────────────────
+```
+
+---
+
+## Step 7: Estimator Confidence Model
+
+Always include this section to communicate reliability of each estimate.
+
+```
+Estimator Confidence
+──────────────────────────────────────────────────────────
+Signal                    Confidence    Basis
+──────────────────────────────────────────────────────────
+LOC & file counts         High          Direct measurement
+Feature surface metrics   High          Direct analysis
+Module complexity tiers   Medium        Expert judgment
+Git signal analysis       Medium        Repo history
+Actual hours billed       Medium        Requires external data
+AI usage intensity        Low           Inferred from patterns
+Historical benchmarks     Low           Limited comparators
+──────────────────────────────────────────────────────────
+```
+
+---
+
+## Step 8: Produce the Report
+
+Use the following report structure. Maintain an objective, analytical tone throughout. Avoid value judgments ("you did well", "you left money on the table"). Use neutral framing: "Cost Efficiency Assessment", "Delivery Efficiency", "Engineering Quality Indicators".
+
+---
+
+## Report Format
+
+```
+# Project Cost & Execution Audit
+**Project**: [name]
+**Date**: [date]
+**Analyzed by**: BlackBox Vision — Internal
+
+---
+
+## System Scope
+
+[Scope snapshot table from Step 2]
+
+---
+
+## Effort Estimation
+
+[Module inventory and total from Step 3a]
+
+### Git Signal Analysis
+
+[Cross-check findings from Step 3b — commit volume, avg size, churn files, author split]
+
+---
+
+## AI-Assisted Rebuild
+
+### Code Authorship Split
+[From Step 4a]
+
+### Token Consumption Model
+[From Step 4b]
+
+### Delivery Timeline
+[Phase table from Step 4c]
+
+---
+
+## Financial Assessment
+
+### Cost Comparison
+[Table from Step 5a]
+
+### Gross Margin Analysis
+[From Step 5b]
+
+### AI Leverage Assessment
+[From Step 5c]
+
+---
+
+## Complexity & Risk Drivers
+
+[Risk table from Step 6]
+
+---
+
+## Estimator Confidence
+
+[Confidence table from Step 7]
+
+---
+
+## Key Findings
+
+[3–5 bullet points — factual observations only, no prescriptions]
+- Estimated effort: XXX–XXX hrs; actual delivery: XXX hrs (ΔX%)
+- AI leverage: [low/medium/high relative to scope potential]
+- Highest-complexity areas: [module names]
+- Gross margin at contract price: XX%
+- Estimated rebuild cost with AI fleet today: $XX,XXX
+```
+
+---
+
+## Important Constraints
+
+1. **Never use COCOMO.** It is not appropriate for NestJS/Prisma/Refine/Turborepo stacks.
+2. **LOC is a secondary signal only.** Use it for context, not as a primary effort driver. Modern TypeScript stacks (Prisma, NestJS decorators, generated DTOs) are inherently verbose.
+3. **Approximate clearly.** When a value is estimated rather than measured, prefix with `~` and note the basis.
+4. **No prescriptions in the main report.** The report describes what happened. If the user asks for recommendations, provide them separately.
+5. **Module tiers beat formulas.** An experienced engineer's judgment on module complexity is more reliable than any algorithmic estimate for projects of this size.
+6. **This report is internal.** Write for a technical co-founder reviewing their own work, not for a client. Be direct about gaps, overestimates, and unrealized leverage.
